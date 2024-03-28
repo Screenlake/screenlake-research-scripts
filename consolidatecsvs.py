@@ -1,6 +1,7 @@
 import multiprocessing
 import json
 import pathlib
+import shutil
 import uuid
 import zipfile
 import pandas as pd
@@ -12,6 +13,8 @@ import boto3
 from datetime import datetime, timedelta
 import os
 import cv2
+from PIL import Image
+import numpy as np
 
 s3 = boto3.client('s3')
 
@@ -533,7 +536,21 @@ def redact_face(image, x, y, w, h):
         w, h: The width and height of the bounding box.
     """
     image[y:y+h, x:x+w] = (0, 0, 0)
+def delete_folder(folder_path):
+    """
+    Deletes a folder and all its contents.
 
+    Args:
+        folder_path (str): The path to the folder to be deleted.
+    """
+    try:
+        # Remove the folder and all its contents
+        shutil.rmtree(folder_path)
+        print(f"Successfully deleted the folder: {folder_path}")
+    except FileNotFoundError:
+        print("The folder does not exist.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 def combine_csv_files(input_dict, query_id):
     output_folder = f"{query_id}/combined"
@@ -573,6 +590,18 @@ def combine_csv_files(input_dict, query_id):
                     df.to_csv(combined_csv, mode='a', header=False, index=False)
 
 
+# if __name__ == "__main__":
+#     # Example usage:
+#     folder_dict = {
+#         "folder1": ["folder1/screenshot_data_1.csv", "folder1/screenshot_data_2.csv", "folder1/screenshot_data_3.csv"],
+#         "folder2": ["folder2/accessibility_data_1.csv", "folder2/accessibility_data_2.csv"],
+#         "folder3": ["folder3/app_segement_data_1.csv", "folder3/app_segement_data_2.csv"],
+#         "folder4": ["folder4/session_data_1.csv"]
+#     }
+#
+#     combine_csv_files(folder_dict)
+
+
 # Step 7: Main function to orchestrate the workflow
 def main():
     s3 = connect_to_s3()
@@ -581,13 +610,13 @@ def main():
 
     zip_batch_size, num_processors, query_id = set_batch_and_processors()
     download_zip_files_in_batches(s3, bucket_name, path, start_date, end_date, zip_batch_size, num_processors, query_id)
-
-    query_id = 'query_fa9a713f-2e86-40e6-9d6d-74013b69b391'
     process_child_folder_and_unzip_async(query_id)
 
     result = process_child_folders_csvs(os.path.join(query_id, 'unzipped'))
     combine_csv_files(result, query_id)
 
+    delete_folder(os.path.join(query_id, "unzipped"))
+    delete_folder(os.path.join(query_id, "zipped"))
 
 if __name__ == "__main__":
     main()
