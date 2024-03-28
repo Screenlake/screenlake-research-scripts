@@ -1,80 +1,99 @@
 import multiprocessing
 import json
 import pathlib
+import uuid
 import zipfile
 import pandas as pd
 import pytz
 import boto3
 from tqdm import tqdm
 import logging
-
+import boto3
+from datetime import datetime, timedelta
 import os
 import cv2
-from PIL import Image
-import numpy as np
-
 
 s3 = boto3.client('s3')
 
 # Load the pre-trained face detection model
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
+
 # Step 1: Connect to AWS S3
 def connect_to_s3():
-    # Check if AWS credentials are already configured
-    if os.path.exists(os.path.expanduser("~/.aws/credentials")) and os.path.exists(os.path.expanduser("~/.aws/config")):
-        use_existing = input("AWS credentials are already configured. Do you want to use existing credentials? (y/n): ")
+    """
+    Connects to AWS S3 using existing credentials or prompts for new credentials.
+    Returns:
+        boto3 S3 client
+    """
+    credentials_path = os.path.expanduser("~/.aws/credentials")
+    config_path = os.path.expanduser("~/.aws/config")
+
+    # Check if AWS credentials and configuration files exist
+    if os.path.exists(credentials_path) and os.path.exists(config_path):
+        use_existing = input("AWS credentials are found. Use existing credentials? (y/n): ")
         if use_existing.lower() == 'y' or not use_existing:
             logging.info("Using existing AWS credentials.")
-            s3 = boto3.client('s3')
         else:
-            # Prompt the user for AWS credentials
             aws_access_key = input("Enter AWS Access Key: ")
             aws_secret_key = input("Enter AWS Secret Key: ")
-            s3 = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
+            return boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
     else:
-        # Prompt the user for AWS credentials
         aws_access_key = input("Enter AWS Access Key: ")
         aws_secret_key = input("Enter AWS Secret Key: ")
-        s3 = boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
+        return boto3.client('s3', aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
 
-    return s3
-
-
-import boto3
-from datetime import datetime, timedelta
+    return boto3.client('s3')
 
 
 def get_date_range_from_user():
+    """
+    Prompts the user to input a date range and returns the start and end dates as datetime objects.
+    Returns:
+        tuple: start_date, end_date
+    """
     start_date_str = input("Enter the start date (YYYY-MM-DD, or press Enter for 1 year ago): ")
-    end_date_str = input("Enter the end date (YYYY-MM-DD, or press Enter for now): ")
+    end_date_str = input("Enter the end date (YYYY-MM-DD, or press Enter for today): ")
 
-    # Set default values for start and end dates
+    # Set default or specified start date
     if not start_date_str:
         start_date = datetime.now() - timedelta(days=365)
     else:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
 
+    # Set default or specified end date
     if not end_date_str:
         end_date = datetime.now()
     else:
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
 
     if start_date > end_date:
-        raise ValueError("Start date cannot be greater than end date.")
-
+        raise ValueError("Start date cannot be after end date.")
     return start_date, end_date
 
 
 def list_folders_in_path(s3, bucket_name, path):
-    # List folders under the specified path
+    """
+    Lists folders in a specified path within an S3 bucket.
+    Args:
+        s3: Boto3 S3 client
+        bucket_name: Name of the S3 bucket
+        path: Path within the S3 bucket
+    Returns:
+        list: Folders under the specified path
+    """
     response = s3.list_objects_v2(Bucket=bucket_name, Prefix=path, Delimiter='/')
     common_prefixes = response.get('CommonPrefixes', [])
-    folders = [prefix.get('Prefix') for prefix in common_prefixes]
-    return folders
+    return [prefix.get('Prefix') for prefix in common_prefixes]
 
 
 def get_bucket_and_path():
+    """
+    Interactively select a directory path within an AWS S3 bucket based on user input.
+
+    Returns:
+        Tuple containing the selected bucket name and directory path.
+    """
     default_bucket_name = "screenlake-zip-prod"
     s3 = boto3.client('s3')
 
@@ -117,12 +136,6 @@ def get_bucket_and_path():
             header = 'Here is a list of panelist who will have CSVs created'
 
             return bucket_name, selected_path
-            # # Display folder options for user selection
-            # logging.info(f'Select a {header}:')
-            # for i, folder in enumerate(folders, start=1):
-            #     split_folders = folder.split('/')
-            #     folder_name = split_folders[len(split_folders) - 2]
-            #     logging.info(f"{i}. {folder_name}")
         else:
             # Display folder options for user selection
             logging.info(f'Select a {header}:')
@@ -154,6 +167,17 @@ def get_bucket_and_path():
 
 # Step 3: Query by date range
 def query_by_date_range(s3, bucket_name, path, start_date, end_date):
+    """
+    Filters objects in an S3 bucket path by a date range.
+    Args:
+        s3: Boto3 S3 client
+        bucket_name: Name of the S3 bucket
+        path: Path within the S3 bucket
+        start_date: Start of the date range as datetime
+        end_date: End of the date range as datetime
+    Returns:
+        list: Filtered S3 objects within the date range
+    """
     objects = []
     next_token = None
 
@@ -181,49 +205,72 @@ def query_by_date_range(s3, bucket_name, path, start_date, end_date):
     return filtered_objects
 
 
-# Helper function: Calculate total size of files in the date range
-def calculate_total_size(s3, bucket_name, path, start_date, end_date):
-    # Add logic to calculate the total size of files in the date range
-    pass
-
-
 # Step 4: Set batch and processor parameters
 def set_batch_and_processors():
-    zip_batch_size = int(input("Enter the batch size for zip file downloads (default: 25): ") or 25)
-    num_processors = int(input("Enter the number of processors (default: 4): ") or 4)
+    """
+    Sets up the batch size for zip file downloads and the number of processors to use.
+    Also prepares the directory structure for storing query results and configures a query ID.
 
-    # query_id = f"query_{uuid.uuid4()}"
-    query_id = "query_test"
+    Returns:
+        A tuple containing the batch size, number of processors, and the query ID.
+    """
+    # Prompt the user for batch size and number of processors with default values
+    try:
+        zip_batch_size = int(input("Enter the batch size for zip file downloads (default: 25): ") or 25)
+        num_processors = int(input("Enter the number of processors (default: 4): ") or 4)
+    except ValueError as e:
+        logging.error("Invalid input, please enter a number.")
+        raise e
+
+    # Generate a unique query ID for each session to avoid conflicts
+    query_id = f"query_{uuid.uuid4()}"
+
+    # Configuration dictionary for the query
     query_config = {
         "queryId": query_id,
         "batchSize": zip_batch_size,
-        "numFilesToDownload": 0,
-        "numFilesDownloaded": 0,
-        "lastBatchBeginId": ""
+        "numFilesToDownload": 0,  # Initial setup, no files to download yet
+        "numFilesDownloaded": 0,  # Tracker for downloaded files
+        "lastBatchBeginId": ""    # Placeholder for tracking batches
     }
 
-    # Check if the folder with query_id exists, and create it if it doesn't
-    query_folder = os.path.join(query_id)
-    if not os.path.exists(query_folder):
-        os.makedirs(query_folder)
+    # Prepare directories for zipped and unzipped files
+    directories = {
+        "base": query_id,
+        "zipped": os.path.join(query_id, "zipped"),
+        "unzipped": os.path.join(query_id, "unzipped")
+    }
 
-    zipped_folder = os.path.join(query_id, "zipped")
-    if not os.path.exists(zipped_folder):
-        os.makedirs(zipped_folder)
+    # Create the directories if they don't exist
+    for directory in directories.values():
+        os.makedirs(directory, exist_ok=True)
 
-    unzipped_folder = os.path.join(query_id, "unzipped")
-    if not os.path.exists(unzipped_folder):
-        os.makedirs(unzipped_folder)
-
-    with open(f"{query_id}/query_config.json", "w") as config_file:
+    # Save the query configuration to a JSON file
+    config_path = os.path.join(query_id, "query_config.json")
+    with open(config_path, "w") as config_file:
         json.dump(query_config, config_file)
 
+    logging.info(f"Configuration saved to {config_path}.")
     return zip_batch_size, num_processors, query_id
+
 
 
 # Step 5: Download zip files in batches
 def download_zip_files_in_batches(s3, bucket_name, path, start_date, end_date, zip_batch_size, num_processors,
                                   query_id):
+    """
+     Downloads objects from S3 in batches, using multiple processes.
+
+     Args:
+         s3_client: Boto3 S3 client instance.
+         bucket_name: Name of the S3 bucket.
+         path: Path within the S3 bucket from which to download objects.
+         start_date: Start date for querying objects.
+         end_date: End date for querying objects.
+         zip_batch_size: Number of files to download in each batch.
+         num_processors: Number of parallel processes to use for downloading.
+         query_id: Unique identifier for the query/download session.
+     """
     objects_to_download = query_s3_objects_in_date_range(s3, bucket_name, path, start_date, end_date)
     num_objects = len(objects_to_download)
 
@@ -252,30 +299,22 @@ def download_zip_files_in_batches(s3, bucket_name, path, start_date, end_date, z
 
 
 def download_batch(batch, query_id, bucket_name):
-    with tqdm(total=len(batch), desc="Downloading files") as pbar:
-        for obj in batch:
-            # Download the object using S3 client
-            file_split = obj['Key'].split('/')
-            folder = file_split[len(file_split) - 2]
-            query_folder = os.path.join(f'{query_id}/zipped/{folder}')
-            file_name = file_split[len(file_split) - 1]
+    """
+    Downloads a batch of files from an S3 bucket.
 
-            if not os.path.exists(query_folder):
-                os.makedirs(query_folder)
+    Args:
+        s3_client: Boto3 S3 client instance.
+        batch: List of objects to download.
+        query_id: Unique identifier for the query/download session.
+        bucket_name: Name of the S3 bucket.
+    """
+    for obj in tqdm(batch, desc="Downloading files"):
+        file_path = os.path.join(f'{query_id}/zipped', *obj['Key'].split('/')[1:])  # Construct local file path
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)  # Ensure the directory exists
 
-            key = f"{query_id}/zipped/{folder}/{file_name}"
-            if not os.path.exists(key):
-                s3.download_file(bucket_name, obj['Key'], key)
-                pbar.update(1)
-
-
-# Step 6: Unzip and save CSVs
-# def unzip_and_save_csvs(zip_file_path, output_folder):
-#     with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
-#         for file_name in zip_ref.namelist():
-#             if file_name.endswith('.csv'):
-#                 zip_ref.extract(file_name, output_folder)
-
+        # Download file if it doesn't already exist
+        if not os.path.exists(file_path):
+            s3.download_file(bucket_name, obj['Key'], file_path)
 
 def query_s3_objects_in_date_range(s3, bucket_name, path, start_date, end_date):
     objects = []
@@ -311,7 +350,8 @@ def query_s3_objects_in_date_range(s3, bucket_name, path, start_date, end_date):
         if start_date <= last_modified <= end_date:
             filtered_objects.append(obj)
             count += 1  # Increment the count for each file fetched
-            logging.info(f"Files fetched: {count}", end='\r')  # Print the count with carriage return to overwrite the line
+            logging.info(f"Files fetched: {count}",
+                         end='\r')  # Print the count with carriage return to overwrite the line
 
     # Print a newline to separate the progress count
     logging.info("")
@@ -320,69 +360,78 @@ def query_s3_objects_in_date_range(s3, bucket_name, path, start_date, end_date):
 
 
 def unzip_file(zip_file, destination_folder, image_folder):
+    """
+    Unzips a file to a specified destination folder, with additional processing for images.
+
+    Args:
+        zip_file: Path to the zip file.
+        destination_folder: Folder where files should be extracted to.
+        image_folder: Folder where images should be stored after processing.
+    """
     try:
+        count_of_existing_files, count_of_non_existing_files = 0, 0
+
         with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-            count_of_existing_files = 0
-            count_of_non_existing_files = 0
             for file_info in zip_ref.infolist():
-                # Extract files ending in .csv
-                if file_info.filename.endswith('.csv'):
-                    zip_ref.extract(file_info, destination_folder)
-                    # logging.info(f"Unzipped {file_info.filename} to {destination_folder}")
-                # Check if the file is a JPG image
-                elif file_info.filename.lower().endswith('.jpg') or file_info.filename.lower().endswith('.jpeg'):
-                    # Construct the full path of the extracted file
-                    extracted_file_path = os.path.join(destination_folder, file_info.filename)
-                    extracted_image_folder_file_path = os.path.join(image_folder, file_info.filename)
+                # Determine the extraction path
+                extracted_file_path = os.path.join(destination_folder, file_info.filename)
+                is_image = file_info.filename.lower().endswith(('.jpg', '.jpeg'))
 
-                    # Check if the file already exists in the destination folder
+                if file_info.filename.endswith('.csv') or is_image:
+                    # Check if the file already exists to avoid re-extraction
                     if not os.path.exists(extracted_file_path):
-                        # Extract the image
                         zip_ref.extract(file_info, destination_folder)
-                        logging.info(f"Unzipped {file_info.filename} to {destination_folder}")
+                        logging.info(f"Extracted: {file_info.filename}")
 
-                        # Full path of the extracted image
-                        image_path = extracted_file_path
-
-                        # Detect and redact faces in the image
-                        detect_and_redact_faces(image_path, extracted_image_folder_file_path)  # Overwrite the image
-                        count_of_non_existing_files = + 1
+                        if is_image:
+                            # Additional processing for images
+                            processed_image_path = os.path.join(image_folder, file_info.filename)
+                            detect_and_redact_faces(extracted_file_path, processed_image_path)
+                            count_of_non_existing_files += 1
                     else:
-                        count_of_existing_files =+ 1
+                        count_of_existing_files += 1
 
-            logging.info(f"Count of already exists files {count_of_existing_files}.")
-            logging.info(f"Count of processed files {count_of_non_existing_files}.")
+            logging.info(f"Existing files count: {count_of_existing_files}")
+            logging.info(f"Processed new files count: {count_of_non_existing_files}")
 
-            try:
-                os.remove(zip_ref.filename)
-                # logging.info(f"File '{zip_ref.filename}' has been deleted.")
-            except OSError as e:
-                logging.info(f"Error deleting file: {str(e)}")
+        # Attempt to remove the original zip file after extraction
+        try:
+            os.remove(zip_file)
+            logging.info(f"Removed zip file: {zip_file}")
+        except OSError as e:
+            logging.error(f"Error deleting zip file {zip_file}: {e}")
 
     except Exception as e:
-        logging.info(f"Error unzipping {zip_file}: {str(e)}")
+        logging.error(f"Error unzipping {zip_file}: {e}")
 
+def process_child_folder_and_unzip_synchronous(parent, children, query_id):
+    """
+    Unzips child folders synchronously within a given parent directory.
 
-def process_child_folder(parent, children, query_id):
-    child_folder_split = parent.split('/')
-    panelist_folder = child_folder_split[len(parent.split('/')) - 1]
-
-    unzipped_folder = "unzipped"
-
-    os.makedirs(unzipped_folder, exist_ok=True)
-
-    split_unzipped_name = parent.split('/')
-    unzipped_name = split_unzipped_name[0]
-
-    os.path.join(unzipped_name, f'{query_id}/panelists/unzipped')
-
+    Args:
+        parent: Parent directory containing child folders.
+        children: List of child folders to be unzipped.
+        query_id: Unique identifier for the operation, used in directory structuring.
+    """
     for child in children:
-        # Unzip files in the child folder
-        pathlib.Path(f'{query_id}/combined/panelists/{panelist_folder}/images').mkdir(parents=True, exist_ok=True)
-        unzip_file(os.path.join(parent, child), f'{query_id}/unzipped/panelists/{panelist_folder}', f'{query_id}/combined/panelists/{panelist_folder}/images')
+        child_path = os.path.join(parent, child)
+        destination_folder = f"{query_id}/unzipped/panelists/{os.path.basename(parent)}"
+        image_folder = f"{query_id}/combined/panelists/{os.path.basename(parent)}/images"
+
+        # Create destination and image folders
+        os.makedirs(destination_folder, exist_ok=True)
+        os.makedirs(image_folder, exist_ok=True)
+
+        unzip_file(child_path, destination_folder, image_folder)
 
 
-def process_child_folders(path):
+def process_child_folder_and_unzip_async(path):
+    """
+    Asynchronously unzips all child folders within a specified path.
+
+    Args:
+        path: Path containing child folders to be unzipped.
+    """
     zipped_child_folders = []
     result_dict = {}
     # Get a list of child folders with their full paths
@@ -405,7 +454,7 @@ def process_child_folders(path):
 
             processes = []
         else:
-            process = multiprocessing.Process(target=process_child_folder,
+            process = multiprocessing.Process(target=process_child_folder_and_unzip_synchronous,
                                               args=(key, list(result_dict[key]), path))
             process.start()
             processes.append(process)
@@ -416,45 +465,75 @@ def process_child_folders(path):
 
 
 def process_child_folders_csvs(path):
-    zipped_child_folders = []
+    """
+    Gathers CSV files from child folders within a given directory.
+
+    Args:
+        path (str): The path to the parent directory.
+
+    Returns:
+        dict: A mapping of child folder names to lists of their CSV files.
+    """
     result_dict = {}
-    # Get a list of child folders with their full paths
-    for root, dirs, files in os.walk(path):
+
+    for root, dirs, _ in os.walk(path):
         for dir_name in dirs:
             child_folder = os.path.join(root, dir_name)
-            zipped_child_folders.append(child_folder)
+            child_files = [os.path.join(child_folder, file) for file in os.listdir(child_folder) if
+                           file.endswith('.csv')]
 
-            child_files = [os.path.join(child_folder, file) for file in os.listdir(child_folder) if file.endswith('.csv')]
-            base_name = os.path.basename(child_folder)
-            if base_name != 'panelist' or base_name != 'panelists':
-                result_dict[os.path.basename(child_folder)] = child_files
+            # Include folder only if it contains CSV files
+            if child_files:
+                result_dict[dir_name] = child_files
+
     return result_dict
 
+
 def detect_and_redact_faces(input_image_path, output_image_path, redaction_type='redact'):
-    # Load the input image
+    """
+    Detects faces in an image and applies redaction or blurring.
+
+    Args:
+        input_image_path (str): Path to the input image.
+        output_image_path (str): Path where the processed image will be saved.
+        redaction_type (str): The type of processing ('redact' or 'blur') to apply to detected faces.
+    """
     image = cv2.imread(input_image_path)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Detect faces in the image
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-    # Process each detected face
     for (x, y, w, h) in faces:
-        # Extract the face region
-        face = image[y:y+h, x:x+w]
-
         if redaction_type == 'blur':
-            # Blur the detected face
-            face = cv2.GaussianBlur(face, (99, 99), 30)
-        elif redaction_type == 'redact':
-            # Redact the detected face by filling it with a solid color (black)
-            face[:] = [0, 0, 0]
+            blur_face(image, x, y, w, h)
+        else:  # Default to 'redact' for any other input
+            redact_face(image, x, y, w, h)
 
-        # Replace the face in the original image with the redacted/blur face
-        image[y:y+h, x:x+w] = face
-
-    # Save the result
     cv2.imwrite(output_image_path, image)
+
+def blur_face(image, x, y, w, h):
+    """
+    Applies Gaussian blurring to a face region in the image.
+
+    Args:
+        image: The image array.
+        x, y: The top-left corner of the face bounding box.
+        w, h: The width and height of the bounding box.
+    """
+    region_of_interest = image[y:y+h, x:x+w]
+    blurred = cv2.GaussianBlur(region_of_interest, (99, 99), 30)
+    image[y:y+h, x:x+w] = blurred
+
+def redact_face(image, x, y, w, h):
+    """
+    Fills a face region in the image with black to redact it.
+
+    Args:
+        image: The image array.
+        x, y: The top-left corner of the face bounding box.
+        w, h: The width and height of the bounding box.
+    """
+    image[y:y+h, x:x+w] = (0, 0, 0)
+
 
 def combine_csv_files(input_dict, query_id):
     output_folder = f"{query_id}/combined"
@@ -485,7 +564,6 @@ def combine_csv_files(input_dict, query_id):
             combined_csv = os.path.join(panelist_folder, f"{prefix}-consolidated.csv")
             header_written = False
 
-
             for file in files:
                 df = pd.read_csv(file)
                 if not header_written:
@@ -493,18 +571,6 @@ def combine_csv_files(input_dict, query_id):
                     header_written = True
                 else:
                     df.to_csv(combined_csv, mode='a', header=False, index=False)
-
-
-# if __name__ == "__main__":
-#     # Example usage:
-#     folder_dict = {
-#         "folder1": ["folder1/screenshot_data_1.csv", "folder1/screenshot_data_2.csv", "folder1/screenshot_data_3.csv"],
-#         "folder2": ["folder2/accessibility_data_1.csv", "folder2/accessibility_data_2.csv"],
-#         "folder3": ["folder3/app_segement_data_1.csv", "folder3/app_segement_data_2.csv"],
-#         "folder4": ["folder4/session_data_1.csv"]
-#     }
-#
-#     combine_csv_files(folder_dict)
 
 
 # Step 7: Main function to orchestrate the workflow
@@ -516,14 +582,8 @@ def main():
     zip_batch_size, num_processors, query_id = set_batch_and_processors()
     download_zip_files_in_batches(s3, bucket_name, path, start_date, end_date, zip_batch_size, num_processors, query_id)
 
-    test_id = 'query_5dfe6586-2f5c-462a-8d7b-67baf8805b6c'
-    zipped = f'{query_id}/zipped'
-    unzipped = f'{query_id}/unzipped'
-    # query_id = 'query_fa9a713f-2e86-40e6-9d6d-74013b69b391'
-    path = os.path.join(test_id)
-    process_child_folders(query_id)
-
-
+    query_id = 'query_fa9a713f-2e86-40e6-9d6d-74013b69b391'
+    process_child_folder_and_unzip_async(query_id)
 
     result = process_child_folders_csvs(os.path.join(query_id, 'unzipped'))
     combine_csv_files(result, query_id)
