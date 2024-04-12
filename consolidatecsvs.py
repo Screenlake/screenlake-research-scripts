@@ -226,7 +226,7 @@ def set_batch_and_processors():
         raise e
 
     # Generate a unique query ID for each session to avoid conflicts
-    query_id = f"query_{uuid.uuid4()}"
+    query_id = f"query_1234"
 
     # Configuration dictionary for the query
     query_config = {
@@ -399,7 +399,7 @@ def unzip_file(zip_file, destination_folder, image_folder):
 
         # Attempt to remove the original zip file after extraction
         try:
-            os.remove(zip_file)
+            # os.remove(zip_file)
             logging.info(f"Removed zip file: {zip_file}")
         except OSError as e:
             logging.error(f"Error deleting zip file {zip_file}: {e}")
